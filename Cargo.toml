@@ -1,0 +1,8 @@
+[package]
+name = "elusion_startup"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+elusion = { version ="8.3.0"}
+tokio = { version = "1.50.0", features = ["rt-multi-thread"] }

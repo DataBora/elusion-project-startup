@@ -1,0 +1,11 @@
+[sources.raw_sales]
+type = "csv"
+path = "files\\SalesData2022.csv"
+
+[sources.raw_products]
+type = "csv"
+path = "files\\Products.csv"
+
+[sources.raw_customers]
+type = "csv"
+path = "files\\Customers.csv"

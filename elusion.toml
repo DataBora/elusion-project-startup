@@ -1,0 +1,16 @@
+[project]
+name = "sales_pipeline"
+version = "1.0"
+
+[materialization]
+bronze = "parquet"
+silver = "parquet"
+gold = "parquet"
+
+[output]
+destination = "local"
+
+[output.local]
+bronze_path = "C:\\Bora\\RUST\\Elusion\\output\\bronze"
+silver_path = "C:\\Bora\\RUST\\Elusion\\output\\silver"
+gold_path = "C:\\Bora\\RUST\\Elusion\\output\\gold"

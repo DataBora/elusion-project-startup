@@ -1,0 +1,13 @@
+services:
+  elusion-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./elusion.toml:/usr/src/app/elusion.toml
+      - ./connections.toml:/usr/src/app/connections.toml
+      - ./files:/usr/src/app/files
+      - ./output:/usr/src/app/output

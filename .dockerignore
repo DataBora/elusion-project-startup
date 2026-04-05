@@ -1,0 +1,7 @@
+target/
+.env
+*.csv
+*.parquet
+*.xlsx
+output/
+.git/

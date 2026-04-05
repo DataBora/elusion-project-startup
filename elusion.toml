@@ -11,6 +11,6 @@ gold = "parquet"
 destination = "local"
 
 [output.local]
-bronze_path = "C:\\Bora\\RUST\\Elusion\\output\\bronze"
-silver_path = "C:\\Bora\\RUST\\Elusion\\output\\silver"
-gold_path = "C:\\Bora\\RUST\\Elusion\\output\\gold"
+bronze_path = "output/bronze"
+silver_path = "output/silver"
+gold_path = "output/gold"

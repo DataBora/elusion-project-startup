@@ -22,20 +22,23 @@ Clone it, configure your sources, write your models, and run. That's it.
 ```
 elusion-project-startup/
 ├── Cargo.toml                  # elusion dependency already configured
+├── Dockerfile                  # Docker build configuration
+├── docker-compose.yml          # Docker Compose with pipeline scheduler
 ├── elusion.toml                # materialization + output paths
 ├── connections.toml            # source declarations
 ├── .env.example                # secrets template — copy to .env
+├── files/                      # put your source data files here
 └── src/
     ├── main.rs                 # wiring — register your models here
     ├── bronze/
     │   ├── mod.rs
-    │   └── brz_example.rs      # example bronze model
+    │   └── brz_sales.rs
     ├── silver/
     │   ├── mod.rs
-    │   └── slv_example.rs      # example silver model
+    │   └── slv_sales_enriched.rs
     └── gold/
         ├── mod.rs
-        └── fct_example.rs      # example gold model (SQL)
+        └── fct_sales_summary.rs
 ```
 
 ---
@@ -60,11 +63,27 @@ CLIENT_ID=your-client-id
 CLIENT_SECRET=your-client-secret
 ```
 
-**4. Configure your sources in `connections.toml`:**
+**4. Put your data files in the `files/` folder:**
+```
+files/
+├── SalesData2022.csv
+├── Products.csv
+└── Customers.csv
+```
+
+**5. Configure your sources in `connections.toml`:**
 ```toml
 [sources.raw_sales]
 type = "csv"
-path = "C:\\Data\\SalesData.csv"
+path = "files/SalesData2022.csv"
+
+[sources.raw_products]
+type = "csv"
+path = "files/Products.csv"
+
+[sources.raw_customers]
+type = "csv"
+path = "files/Customers.csv"
 
 # Fabric source example:
 # [sources.raw_fabric]
@@ -76,7 +95,7 @@ path = "C:\\Data\\SalesData.csv"
 # client_secret = "CLIENT_SECRET"
 ```
 
-**5. Configure output paths in `elusion.toml`:**
+**6. Configure output paths in `elusion.toml`:**
 ```toml
 [project]
 name = "my_pipeline"
@@ -85,21 +104,49 @@ version = "1.0"
 [materialization]
 bronze = "parquet"
 silver = "parquet"
-gold = "delta"
+gold = "parquet"
 
 [output]
 destination = "local"
 
 [output.local]
-bronze_path = "C:\\Data\\output\\bronze"
-silver_path = "C:\\Data\\output\\silver"
-gold_path = "C:\\Data\\output\\gold"
+bronze_path = "output/bronze"
+silver_path = "output/silver"
+gold_path = "output/gold"
 ```
 
-**6. Write your models and wire them in `main.rs`, then run:**
+**7. Write your models and wire them in `main.rs`, then run:**
 ```bash
 cargo run
 ```
+
+---
+
+## 🐳 Running with Docker
+
+The template includes a ready-to-use Docker setup with the pipeline scheduler built in.
+
+**Build and run:**
+```bash
+docker-compose up --build
+```
+
+**Run in background:**
+```bash
+docker-compose up -d --build
+```
+
+**View logs:**
+```bash
+docker-compose logs -f
+```
+
+**Stop:**
+```bash
+docker-compose down
+```
+
+Output Parquet/Delta files will appear in your local `output/` folder via volume mount. The pipeline runs on the schedule defined in `main.rs` — default is every 1 minute.
 
 ---
 
@@ -123,19 +170,51 @@ pub async fn model(ctx: NodeRegistry) -> ElusionResult<CustomDataFrame> {
 }
 ```
 
-**Gold model — `src/gold/fct_summary.rs` (Raw SQL):**
+**Silver model — `src/silver/slv_sales_enriched.rs`:**
 ```rust
-pub const DEPS: &[&str] = &["slv_enriched"];
+use elusion::prelude::*;
+
+pub const DEPS: &[&str] = &["brz_sales", "brz_customers", "brz_products"];
+
+pub async fn model(ctx: NodeRegistry) -> ElusionResult<CustomDataFrame> {
+    let sales = ctx.ref_bronze("brz_sales")?;
+    let customers = ctx.ref_bronze("brz_customers")?;
+    let products = ctx.ref_bronze("brz_products")?;
+
+    sales
+        .join_many([
+            (customers, ["brz_sales.customerkey = brz_customers.customerkey"], "RIGHT"),
+            (products, ["brz_sales.productkey = brz_products.productkey"], "LEFT OUTER"),
+        ])
+        .select([
+            "brz_customers.customerkey",
+            "brz_customers.firstname",
+            "brz_customers.lastname",
+            "brz_products.productname",
+            "brz_sales.orderquantity",
+        ])
+        .elusion("slv_sales_enriched")
+        .await
+}
+```
+
+**Gold model — `src/gold/fct_sales_summary.rs` (Raw SQL):**
+```rust
+pub const DEPS: &[&str] = &["slv_sales_enriched"];
 
 pub const SQL: &str = r#"
     SELECT
         customerkey,
+        firstname,
+        lastname,
         productname,
         SUM(orderquantity) AS total_quantity,
+        AVG(orderquantity) AS avg_quantity,
         COUNT(*) AS order_count
-    FROM slv_enriched
-    GROUP BY customerkey, productname
-    ORDER BY total_quantity DESC
+    FROM slv_sales_enriched
+    GROUP BY customerkey, firstname, lastname, productname
+    HAVING SUM(orderquantity) > 10
+    ORDER BY total_quantity ASC
 "#;
 ```
 
@@ -149,14 +228,28 @@ mod gold;
 
 #[tokio::main]
 async fn main() -> ElusionResult<()> {
-    ElusionProject::from_config("elusion.toml", "connections.toml")
-        .await?
-        .source("raw_sales")
-        .bronze_slice("brz_sales", bronze::brz_sales::DEPS, bronze::brz_sales::model)
-        .silver_slice("slv_enriched", silver::slv_enriched::DEPS, silver::slv_enriched::model)
-        .gold_sql_slice("fct_summary", gold::fct_summary::DEPS, gold::fct_summary::SQL)
-        .run()
-        .await
+    let scheduler = PipelineScheduler::new("1min", || async {
+        ElusionProject::from_config("elusion.toml", "connections.toml")
+            .await?
+            .source("raw_sales")
+            .source("raw_products")
+            .source("raw_customers")
+            .bronze_slice("brz_sales", bronze::brz_sales::DEPS, bronze::brz_sales::model)
+            .bronze_slice("brz_customers", bronze::brz_customers::DEPS, bronze::brz_customers::model)
+            .bronze_slice("brz_products", bronze::brz_products::DEPS, bronze::brz_products::model)
+            .silver_slice("slv_sales_enriched",
+                silver::slv_sales_enriched::DEPS,
+                silver::slv_sales_enriched::model)
+            .gold_sql_slice("fct_sales_summary",
+                gold::fct_sales_summary::DEPS,
+                gold::fct_sales_summary::SQL)
+            .run()
+            .await?;
+        Ok(())
+    }).await?;
+
+    scheduler.shutdown().await?;
+    Ok(())
 }
 ```
 
@@ -166,20 +259,40 @@ async fn main() -> ElusionResult<()> {
 ```
 🚀 Elusion Project - Loading Configuration...
 ✅ Project config loaded: my_pipeline v1.0
-✅ Source 'raw_sales' validated
+✅ Source 'raw_sales' validated: files/SalesData2022.csv
+✅ Source 'raw_customers' validated: files/Customers.csv
+✅ Source 'raw_products' validated: files/Products.csv
+✅ Configuration loaded successfully
 
 🗺️  Execution Plan:
-  Level 1 [Source]      raw_sales
-  Level 2 [Bronze]      brz_sales      → Parquet
-  Level 3 [Silver]      slv_enriched   → Parquet
-  Level 4 [Gold]        fct_summary    → Delta
+  Level 1 [Source]  raw_sales
+  Level 1 [Source]  raw_customers
+  Level 1 [Source]  raw_products
+  Level 2 [Bronze]  brz_sales      → Parquet
+  Level 2 [Bronze]  brz_customers  → Parquet
+  Level 2 [Bronze]  brz_products   → Parquet
+  Level 3 [Silver]  slv_sales_enriched → Parquet
+  Level 4 [Gold]    fct_sales_summary  → Parquet
 
-⚡ Sources load in parallel
-⚡ Bronze models clean in parallel
-▶️  Silver enrichment runs after bronze
-▶️  Gold aggregation runs last
+⚡ Running 3 nodes in parallel (Level 1)
+⚡ Running 3 nodes in parallel (Level 2)
+▶️  Running [Silver] slv_sales_enriched
+▶️  Running [Gold]   fct_sales_summary
 
 🎉 Project completed successfully!
+======================================================================
+Model                          Layer      Rows    Time
+----------------------------------------------------------------------
+raw_sales                      Source     29481   352ms
+raw_customers                  Source     18151   368ms
+raw_products                   Source     293     381ms
+brz_sales                      Bronze     29481   4ms
+brz_customers                  Bronze     18147   4ms
+brz_products                   Bronze     293     3ms
+slv_sales_enriched             Silver     37126   26ms
+fct_sales_summary              Gold       5       65ms
+======================================================================
+Next job execution: 2026-04-05T09:40:00Z UTC Time
 ```
 
 ---
